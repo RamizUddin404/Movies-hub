@@ -1,7 +1,12 @@
 'use client';
 
 import { UserProvider } from '@/context/UserContext';
+import { ErrorBoundary } from './ErrorBoundary';
 
 export function Providers({ children }: { children: React.ReactNode }) {
-  return <UserProvider>{children}</UserProvider>;
+  return (
+    <ErrorBoundary>
+      <UserProvider>{children}</UserProvider>
+    </ErrorBoundary>
+  );
 }

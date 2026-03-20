@@ -1,83 +1,197 @@
 'use client';
 
-import React, { createContext, useContext, useState, useMemo } from 'react';
+import React, { createContext, useContext, useState, useMemo, useEffect } from 'react';
 import { Movie, MOCK_MOVIES } from '@/data/movies';
+import { auth, db } from '@/firebase';
+import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User as FirebaseUser } from 'firebase/auth';
+import { doc, getDoc, setDoc, onSnapshot, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { handleFirestoreError } from '@/lib/firestore-errors';
 
 interface UserContextType {
+  user: FirebaseUser | null;
+  isAuthReady: boolean;
   watchHistory: Movie[];
+  watchlist: Movie[];
   addToHistory: (movie: Movie) => void;
+  clearHistory: () => void;
+  addToWatchlist: (movie: Movie) => void;
+  removeFromWatchlist: (movieId: string) => void;
   recommendations: Movie[];
+  signIn: () => Promise<void>;
+  logOut: () => Promise<void>;
 }
 
 const UserContext = createContext<UserContextType | undefined>(undefined);
 
 export function UserProvider({ children }: { children: React.ReactNode }) {
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
   const [watchHistory, setWatchHistory] = useState<Movie[]>([]);
+  const [watchlist, setWatchlist] = useState<Movie[]>([]);
 
-  const addToHistory = (movie: Movie) => {
-    setWatchHistory(prev => {
-      // If already in history, move it to the front (most recently watched)
-      const filtered = prev.filter(m => m.id !== movie.id);
-      return [movie, ...filtered];
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
+
+      if (currentUser) {
+        // Create user doc if it doesn't exist
+        const userRef = doc(db, 'users', currentUser.uid);
+        try {
+          const userSnap = await getDoc(userRef);
+          if (!userSnap.exists()) {
+            const userData: any = {
+              uid: currentUser.uid,
+              email: currentUser.email,
+              watchHistory: [],
+              watchlist: [],
+              createdAt: serverTimestamp()
+            };
+            if (currentUser.displayName) userData.displayName = currentUser.displayName;
+            if (currentUser.photoURL) userData.photoURL = currentUser.photoURL;
+            
+            await setDoc(userRef, userData);
+          }
+        } catch (error) {
+          handleFirestoreError(error, 'create' as any, `users/${currentUser.uid}`);
+        }
+      } else {
+        setWatchHistory([]);
+        setWatchlist([]);
+      }
     });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthReady || !user) return;
+
+    const userRef = doc(db, 'users', user.uid);
+    const unsubscribe = onSnapshot(userRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setWatchHistory(data.watchHistory || []);
+        setWatchlist(data.watchlist || []);
+      }
+    }, (error) => {
+      handleFirestoreError(error, 'get' as any, `users/${user.uid}`);
+    });
+
+    return () => unsubscribe();
+  }, [user, isAuthReady]);
+
+  const signIn = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error("Error signing in with Google", error);
+    }
   };
 
-  const recommendations = useMemo(() => {
-    if (watchHistory.length === 0) {
-      // Default recommendations (e.g., highly rated or trending mix)
-      return [MOCK_MOVIES[0], MOCK_MOVIES[4], MOCK_MOVIES[7], MOCK_MOVIES[12], MOCK_MOVIES[15], MOCK_MOVIES[2]];
+  const logOut = async () => {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error("Error signing out", error);
     }
+  };
 
-    // 1. Calculate genre frequencies from watch history
-    const genreCounts: Record<string, number> = {};
-    watchHistory.forEach(movie => {
-      movie.genres.forEach(genre => {
-        genreCounts[genre] = (genreCounts[genre] || 0) + 1;
+  const addToHistory = async (movie: Movie) => {
+    if (user) {
+      const userRef = doc(db, 'users', user.uid);
+      try {
+        // Remove the movie if it already exists to move it to the front
+        const newHistory = [movie, ...watchHistory.filter(m => m.id !== movie.id)];
+        await updateDoc(userRef, {
+          watchHistory: newHistory
+        });
+      } catch (error) {
+        handleFirestoreError(error, 'update' as any, `users/${user.uid}`);
+      }
+    } else {
+      setWatchHistory(prev => {
+        const filtered = prev.filter(m => m.id !== movie.id);
+        return [movie, ...filtered];
       });
-    });
+    }
+  };
 
-    // 2. Sort genres by frequency to find user preferences
-    const topGenres = Object.entries(genreCounts)
-      .sort((a, b) => b[1] - a[1])
-      .map(entry => entry[0]);
+  const clearHistory = async () => {
+    if (user) {
+      const userRef = doc(db, 'users', user.uid);
+      try {
+        await updateDoc(userRef, { watchHistory: [] });
+      } catch (error) {
+        handleFirestoreError(error, 'update' as any, `users/${user.uid}`);
+      }
+    } else {
+      setWatchHistory([]);
+    }
+  };
 
-    // 3. Score all unwatched movies based on top genres
-    const unwatchedMovies = MOCK_MOVIES.filter(
-      m => !watchHistory.some(watched => watched.id === m.id)
-    );
-
-    const scoredMovies = unwatchedMovies.map(movie => {
-      let score = 0;
-      movie.genres.forEach(genre => {
-        const index = topGenres.indexOf(genre);
-        if (index !== -1) {
-          // Higher score for more frequent genres. 
-          // If a genre is #1 (index 0), it gets the highest points.
-          score += (topGenres.length - index);
+  const addToWatchlist = async (movie: Movie) => {
+    if (user) {
+      const userRef = doc(db, 'users', user.uid);
+      try {
+        if (!watchlist.some(m => m.id === movie.id)) {
+          await updateDoc(userRef, {
+            watchlist: [movie, ...watchlist]
+          });
         }
+      } catch (error) {
+        handleFirestoreError(error, 'update' as any, `users/${user.uid}`);
+      }
+    } else {
+      setWatchlist(prev => {
+        if (!prev.some(m => m.id === movie.id)) {
+          return [movie, ...prev];
+        }
+        return prev;
       });
-      return { ...movie, score };
-    });
-
-    // 4. Sort by score and return top 6
-    const sortedRecommendations = scoredMovies
-      .filter(m => m.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 6);
-
-    // If we don't have enough recommendations based on genres, pad with random unwatched movies
-    if (sortedRecommendations.length < 6) {
-      const remaining = unwatchedMovies
-        .filter(m => !sortedRecommendations.some(r => r.id === m.id))
-        .slice(0, 6 - sortedRecommendations.length);
-      return [...sortedRecommendations, ...remaining];
     }
+  };
 
-    return sortedRecommendations;
+  const removeFromWatchlist = async (movieId: string) => {
+    if (user) {
+      const userRef = doc(db, 'users', user.uid);
+      try {
+        await updateDoc(userRef, {
+          watchlist: watchlist.filter(m => m.id !== movieId)
+        });
+      } catch (error) {
+        handleFirestoreError(error, 'update' as any, `users/${user.uid}`);
+      }
+    } else {
+      setWatchlist(prev => prev.filter(m => m.id !== movieId));
+    }
+  };
+
+  const [recommendations, setRecommendations] = useState<Movie[]>([]);
+
+  useEffect(() => {
+    import('@/lib/tmdb').then(({ getPopularMovies }) => {
+      getPopularMovies().then(movies => {
+        setRecommendations(movies.slice(0, 6));
+      });
+    });
   }, [watchHistory]);
 
   return (
-    <UserContext.Provider value={{ watchHistory, addToHistory, recommendations }}>
+    <UserContext.Provider value={{ 
+      user, 
+      isAuthReady, 
+      watchHistory, 
+      watchlist,
+      addToHistory, 
+      clearHistory,
+      addToWatchlist,
+      removeFromWatchlist,
+      recommendations, 
+      signIn, 
+      logOut 
+    }}>
       {children}
     </UserContext.Provider>
   );

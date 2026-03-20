@@ -4,8 +4,9 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Search, X, PlayCircle } from 'lucide-react';
 import Image from 'next/image';
-import { MOCK_MOVIES, Movie } from '@/data/movies';
+import { Movie } from '@/data/movies';
 import { useUser } from '@/context/UserContext';
+import { searchMovies } from '@/lib/tmdb';
 
 interface SearchOverlayProps {
   isOpen: boolean;
@@ -15,6 +16,7 @@ interface SearchOverlayProps {
 export default function SearchOverlay({ isOpen, onClose }: SearchOverlayProps) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Movie[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
   const { addToHistory } = useUser();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -25,7 +27,11 @@ export default function SearchOverlay({ isOpen, onClose }: SearchOverlayProps) {
       document.body.style.overflow = 'hidden';
     } else {
       document.body.style.overflow = 'unset';
-      setQuery('');
+      // Clear query when closed, using setTimeout to avoid synchronous setState in effect warning
+      setTimeout(() => {
+        setQuery('');
+        setResults([]);
+      }, 0);
     }
     return () => { document.body.style.overflow = 'unset'; };
   }, [isOpen]);
@@ -33,18 +39,24 @@ export default function SearchOverlay({ isOpen, onClose }: SearchOverlayProps) {
   useEffect(() => {
     if (!query.trim()) {
       setResults([]);
+      setIsSearching(false);
       return;
     }
-    
-    const lowerQuery = query.toLowerCase();
-    const filtered = MOCK_MOVIES.filter(movie => 
-      movie.title.toLowerCase().includes(lowerQuery) ||
-      movie.director.toLowerCase().includes(lowerQuery) ||
-      movie.genres.some(g => g.toLowerCase().includes(lowerQuery)) ||
-      movie.actors.some(a => a.toLowerCase().includes(lowerQuery))
-    );
-    
-    setResults(filtered);
+
+    const timer = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const searchResults = await searchMovies(query);
+        setResults(searchResults);
+      } catch (error) {
+        console.error('Search error:', error);
+        setResults([]);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
   }, [query]);
 
   return (
@@ -79,9 +91,14 @@ export default function SearchOverlay({ isOpen, onClose }: SearchOverlayProps) {
 
             {/* Search Results */}
             <div className="mt-8 pb-20">
-              {query.trim() && results.length === 0 ? (
+              {isSearching ? (
                 <div className="text-center py-20">
-                  <p className="text-2xl text-gray-500">No results found for "{query}"</p>
+                  <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                  <p className="text-gray-500">Searching for movies...</p>
+                </div>
+              ) : query.trim() && results.length === 0 ? (
+                <div className="text-center py-20">
+                  <p className="text-2xl text-gray-500">No results found for &quot;{query}&quot;</p>
                   <p className="text-gray-600 mt-2">Try searching for a different title, actor, director, or genre.</p>
                 </div>
               ) : (
